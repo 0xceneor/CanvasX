@@ -1,0 +1,18 @@
+{
+  "name": "canvas-new",
+  "version": "1.0.0",
+  "description": "JavaScript SDK for canvas.new — the self-hosted visual output layer for AI agents",
+  "main": "index.js",
+  "type": "module",
+  "exports": {
+    ".": "./index.js"
+  },
+  "scripts": {
+    "test": "node --experimental-vm-modules node_modules/.bin/jest"
+  },
+  "keywords": ["canvas", "html", "ai", "agents", "gui", "dashboard"],
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  }
+}

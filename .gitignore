@@ -1,0 +1,23 @@
+# Environment — NEVER commit real secrets
+.env
+
+# Generated test artifacts
+_part1.html
+_part2.js
+test-output.html
+
+# Canvas data (user content, not source)
+data/canvases/*.json
+!data/canvases/.gitkeep
+
+# Node
+node_modules/
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# PHP
+*.swp
+*.swo

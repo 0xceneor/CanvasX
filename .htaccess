@@ -1,0 +1,24 @@
+Options -Indexes
+RewriteEngine On
+
+# Route /c/<id> to canvas viewer
+RewriteRule ^c/([a-zA-Z0-9]+)/?$ public/c.php?id=$1 [QSA,L]
+
+# Route /generate to generator UI
+RewriteRule ^generate/?$ public/generate.php [QSA,L]
+
+# Route /pipeline/<file> to pipeline directory
+RewriteRule ^pipeline/(.+)$ pipeline/$1 [QSA,L]
+
+# Route /api/<file> to api directory
+RewriteRule ^api/(.+)$ api/$1 [QSA,L]
+
+# Route /assets/<file> to public assets
+RewriteRule ^assets/(.+)$ public/assets/$1 [QSA,L]
+
+# Default: serve public/
+RewriteRule ^$ public/generate.php [L]
+
+# Block access to data directory and env
+RewriteRule ^data/ - [F,L]
+RewriteRule ^\.env$ - [F,L]
