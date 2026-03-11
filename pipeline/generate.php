@@ -1,8 +1,19 @@
 <?php
+declare(strict_types=1);
+
 /**
  * POST /pipeline/generate
- * AI Pipeline: text/context → MiniMax M2.5 → HTML → canvas stored in PostgreSQL → live URL
+ * AI Pipeline: text/context → MiniMax M2.5 → HTML → PostgreSQL → live URL
+ *
+ * PHP 8.4 features:
+ *  - declare(strict_types=1)
+ *  - Backed enum CanvasStyle with hint() method (8.1)
+ *  - json_validate() before json_decode (8.3)
+ *  - match expression replacing array lookup + isset
+ *  - Named arguments on json_encode / curl
+ *  - static closure on CURLOPT_WRITEFUNCTION
  */
+
 require_once __DIR__ . '/../config/db.php';
 
 header('Content-Type: application/json');
@@ -11,39 +22,63 @@ header('Access-Control-Allow-Headers: Content-Type');
 
 if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') { http_response_code(204); exit; }
 
-$input   = json_decode(file_get_contents('php://input'), true);
-$context = trim($input['context'] ?? '');
-$style   = trim($input['style']   ?? 'auto');
-$title   = trim($input['title']   ?? '');
+// ── Input validation ──────────────────────────────────────────────────────────
+$raw = (string) file_get_contents('php://input');
 
-if (!$context) {
+if (!json_validate($raw)) {
+    http_response_code(400);
+    echo json_encode(['error' => 'Invalid JSON body']);
+    exit;
+}
+
+$input   = json_decode($raw, true);
+$context = trim((string)($input['context'] ?? ''));
+$style   = trim((string)($input['style']   ?? 'auto'));
+$title   = trim((string)($input['title']   ?? ''));
+
+if ($context === '') {
     http_response_code(400);
     echo json_encode(['error' => 'context required']);
     exit;
 }
 
-$system_prompt = require __DIR__ . '/prompt.php';
+// ── Canvas style enum (PHP 8.1 backed enum) ───────────────────────────────────
+enum CanvasStyle: string
+{
+    case Auto      = 'auto';
+    case Dashboard = 'dashboard';
+    case Report    = 'report';
+    case Tool      = 'tool';
+    case Creative  = 'creative';
+    case Data      = 'data';
+    case List      = 'list';
 
+    public function hint(): string
+    {
+        return match ($this) {
+            self::Auto      => '',
+            self::Dashboard => "\n\nIMPORTANT: Use the Dashboard layout.",
+            self::Report    => "\n\nIMPORTANT: Use the Report/Document layout.",
+            self::Tool      => "\n\nIMPORTANT: Use the Tool/Interactive layout.",
+            self::Creative  => "\n\nIMPORTANT: Use the Creative/Generative layout.",
+            self::Data      => "\n\nIMPORTANT: Use the Data Visualization layout.",
+            self::List      => "\n\nIMPORTANT: Use the List/Tracker layout.",
+        };
+    }
+}
+
+$canvas_style  = CanvasStyle::tryFrom($style) ?? CanvasStyle::Auto;
+$system_prompt = (require __DIR__ . '/prompt.php') . $canvas_style->hint();
+
+// ── API key ───────────────────────────────────────────────────────────────────
 $api_key = env('NVIDIA_API_KEY');
-if (!$api_key) {
+if ($api_key === '') {
     http_response_code(500);
     echo json_encode(['error' => 'NVIDIA_API_KEY not configured']);
     exit;
 }
 
-// Style hints
-$style_hints = [
-    'dashboard' => "\n\nIMPORTANT: Use the Dashboard layout.",
-    'report'    => "\n\nIMPORTANT: Use the Report/Document layout.",
-    'tool'      => "\n\nIMPORTANT: Use the Tool/Interactive layout.",
-    'creative'  => "\n\nIMPORTANT: Use the Creative/Generative layout.",
-    'data'      => "\n\nIMPORTANT: Use the Data Visualization layout.",
-    'list'      => "\n\nIMPORTANT: Use the List/Tracker layout.",
-];
-if (isset($style_hints[$style])) {
-    $system_prompt .= $style_hints[$style];
-}
-
+// ── NVIDIA / MiniMax API call (streaming) ────────────────────────────────────
 $payload = json_encode([
     'model'       => 'minimaxai/minimax-m2.5',
     'messages'    => [
@@ -68,14 +103,15 @@ curl_setopt_array($ch, [
     ],
     CURLOPT_RETURNTRANSFER => false,
     CURLOPT_TIMEOUT        => 120,
-    CURLOPT_WRITEFUNCTION  => function ($ch, $data) use (&$html_buffer) {
+    CURLOPT_WRITEFUNCTION  => static function ($ch, string $data) use (&$html_buffer): int {
         foreach (explode("\n", $data) as $line) {
             $line = trim($line);
             if (!str_starts_with($line, 'data: ')) continue;
-            $raw = substr($line, 6);
-            if ($raw === '[DONE]') break;
-            $json = json_decode($raw, true);
-            $html_buffer .= $json['choices'][0]['delta']['content'] ?? '';
+            $chunk = substr($line, 6);
+            if ($chunk === '[DONE]') break;
+            if (!json_validate($chunk)) continue;
+            $parsed = json_decode($chunk, true);
+            $html_buffer .= $parsed['choices'][0]['delta']['content'] ?? '';
         }
         return strlen($data);
     },
@@ -85,30 +121,27 @@ $ok  = curl_exec($ch);
 $err = curl_error($ch);
 curl_close($ch);
 
-if (!$ok || $err) {
+if (!$ok || $err !== '') {
     http_response_code(502);
     echo json_encode(['error' => 'AI API error: ' . $err]);
     exit;
 }
 
-// Extract HTML from model response
+// ── Extract HTML ──────────────────────────────────────────────────────────────
 $html = extract_html($html_buffer);
 
-// Auto-detect title
-if (!$title) {
+if ($title === '') {
     preg_match('/<title[^>]*>(.*?)<\/title>/is', $html, $m);
-    $title = $m[1] ? strip_tags($m[1]) : 'Generated Canvas';
-    $title = trim($title);
+    $title = isset($m[1]) ? trim(strip_tags($m[1])) : 'Generated Canvas';
 }
 
-// Store in PostgreSQL via create API
+// ── Persist to PostgreSQL ─────────────────────────────────────────────────────
 try {
-    $pdo        = db();
     $id         = nanoid(8);
     $edit_token = make_edit_token();
     $base_url   = env('CANVAS_BASE_URL', 'http://localhost:8080');
 
-    $pdo->prepare("
+    db()->prepare("
         INSERT INTO canvases (id, title, html, edit_token)
         VALUES (:id, :title, :html, :edit_token)
     ")->execute([
@@ -132,9 +165,14 @@ echo json_encode([
     'title'      => $title,
 ]);
 
-function extract_html(string $raw): string {
-    if (preg_match('/```(?:html)?\s*([\s\S]*?)```/i', $raw, $m)) return trim($m[1]);
-    $t = ltrim($raw);
-    if (str_starts_with($t, '<!') || str_starts_with($t, '<html')) return $raw;
-    return $raw;
+// ── Helpers ───────────────────────────────────────────────────────────────────
+function extract_html(string $raw): string
+{
+    if (preg_match('/```(?:html)?\s*([\s\S]*?)```/i', $raw, $m)) {
+        return trim($m[1]);
+    }
+    $trimmed = ltrim($raw);
+    return (str_starts_with($trimmed, '<!') || str_starts_with($trimmed, '<html'))
+        ? $raw
+        : $raw;
 }

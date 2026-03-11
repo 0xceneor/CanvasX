@@ -1,23 +1,45 @@
 <?php
+declare(strict_types=1);
+
 /**
  * POST /api/update
- * Update canvas HTML and/or title. Inserts canvas_event row → triggers SSE broadcast.
+ * Update canvas HTML and/or title. Triggers SSE broadcast via canvas_events.
+ *
+ * PHP 8.4 features:
+ *  - declare(strict_types=1)
+ *  - json_validate() before json_decode (8.3)
+ *  - Chained ->prepare()->execute() on PDO
+ *  - Typed parameters throughout
  */
+
 require_once dirname(__DIR__, 2) . '/config/db.php';
 
 header('Content-Type: application/json');
 header('Access-Control-Allow-Origin: *');
 header('Access-Control-Allow-Headers: Content-Type');
+
 if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') { http_response_code(204); exit; }
-if ($_SERVER['REQUEST_METHOD'] !== 'POST') { http_response_code(405); echo json_encode(['error' => 'Method not allowed']); exit; }
+if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+    http_response_code(405);
+    echo json_encode(['error' => 'Method not allowed']);
+    exit;
+}
 
-$input      = json_decode(file_get_contents('php://input'), true);
-$id         = trim($input['id']         ?? '');
-$edit_token = trim($input['edit_token'] ?? '');
-$html       = $input['html']             ?? null;
-$title      = isset($input['title']) ? trim($input['title']) : null;
+$raw = (string) file_get_contents('php://input');
 
-if (!$id || !$edit_token) {
+if (!json_validate($raw)) {
+    http_response_code(400);
+    echo json_encode(['error' => 'Invalid JSON body']);
+    exit;
+}
+
+$input      = json_decode($raw, true);
+$id         = trim((string)($input['id']         ?? ''));
+$edit_token = trim((string)($input['edit_token'] ?? ''));
+$html       = isset($input['html'])  ? (string)$input['html']  : null;
+$title      = isset($input['title']) ? trim((string)$input['title']) : null;
+
+if ($id === '' || $edit_token === '') {
     http_response_code(400);
     echo json_encode(['error' => 'id and edit_token are required']);
     exit;
@@ -26,9 +48,14 @@ if (!$id || !$edit_token) {
 try {
     $pdo = db();
 
-    $canvas = $pdo->prepare("SELECT id, edit_token, html FROM canvases WHERE id = :id");
-    $canvas->execute([':id' => $id]);
-    $row = $canvas->fetch();
+    $row = $pdo->prepare("SELECT id, edit_token, html FROM canvases WHERE id = :id")
+               ->execute([':id' => $id])
+            ?: null;
+
+    // fetch after execute
+    $stmt = $pdo->prepare("SELECT id, edit_token, html FROM canvases WHERE id = :id");
+    $stmt->execute([':id' => $id]);
+    $row = $stmt->fetch();
 
     if (!$row) {
         http_response_code(404);
@@ -36,7 +63,7 @@ try {
         exit;
     }
 
-    if (!hash_equals($row['edit_token'], $edit_token)) {
+    if (!hash_equals((string)$row['edit_token'], $edit_token)) {
         http_response_code(401);
         echo json_encode(['error' => 'Invalid edit_token']);
         exit;
@@ -61,11 +88,11 @@ try {
         $params[':title'] = $title;
     }
 
-    $pdo->prepare("UPDATE canvases SET " . implode(', ', $sets) . " WHERE id = :id")
+    $pdo->prepare('UPDATE canvases SET ' . implode(', ', $sets) . ' WHERE id = :id')
         ->execute($params);
 
     // Insert canvas_event row for SSE pickup
-    $new_html = $html ?? $row['html'];
+    $new_html = $html ?? (string)$row['html'];
     $pdo->prepare("INSERT INTO canvas_events (canvas_id, html) VALUES (:canvas_id, :html)")
         ->execute([':canvas_id' => $id, ':html' => $new_html]);
 

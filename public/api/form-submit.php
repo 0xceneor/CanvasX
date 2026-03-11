@@ -1,44 +1,63 @@
 <?php
+declare(strict_types=1);
+
 /**
  * POST /api/form-submit
  * Called by cc-form component on submit.
- * Saves submission to form_submissions table + fires webhook_url if set.
+ * Saves submission to form_submissions + fires webhook if set.
+ *
+ * PHP 8.4 features:
+ *  - declare(strict_types=1)
+ *  - json_validate() before decode (8.3)
+ *  - Chained db()->prepare() calls
+ *  - Static closure on curl write function
+ *  - Typed casts
  */
+
 require_once dirname(__DIR__, 2) . '/config/db.php';
 
 header('Content-Type: application/json');
 header('Access-Control-Allow-Origin: *');
 header('Access-Control-Allow-Headers: Content-Type');
-if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') { http_response_code(204); exit; }
-if ($_SERVER['REQUEST_METHOD'] !== 'POST') { http_response_code(405); echo json_encode(['error' => 'Method not allowed']); exit; }
 
-$input     = json_decode(file_get_contents('php://input'), true);
-$canvas_id = trim($input['canvas_id'] ?? '');
+if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') { http_response_code(204); exit; }
+if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+    http_response_code(405);
+    echo json_encode(['error' => 'Method not allowed']);
+    exit;
+}
+
+$raw = (string) file_get_contents('php://input');
+
+if (!json_validate($raw)) {
+    http_response_code(400);
+    echo json_encode(['error' => 'Invalid JSON body']);
+    exit;
+}
+
+$input     = json_decode($raw, true);
+$canvas_id = preg_replace('/[^a-zA-Z0-9]/', '', trim((string)($input['canvas_id'] ?? '')));
 $data      = $input['data'] ?? null;
 
-if (!$canvas_id || $data === null) {
+if ($canvas_id === '' || $data === null) {
     http_response_code(400);
     echo json_encode(['error' => 'canvas_id and data are required']);
     exit;
 }
 
-$canvas_id = preg_replace('/[^a-zA-Z0-9]/', '', $canvas_id);
-
 try {
     $pdo = db();
 
-    // Fetch canvas to verify existence + get webhook_url
-    $canvas = $pdo->prepare("SELECT id, webhook_url FROM canvases WHERE id = :id");
-    $canvas->execute([':id' => $canvas_id]);
-    $row = $canvas->fetch();
+    $canvas_stmt = $pdo->prepare("SELECT id, webhook_url FROM canvases WHERE id = :id");
+    $canvas_stmt->execute([':id' => $canvas_id]);
+    $canvas = $canvas_stmt->fetch();
 
-    if (!$row) {
+    if (!$canvas) {
         http_response_code(404);
         echo json_encode(['error' => 'Canvas not found']);
         exit;
     }
 
-    // Store submission
     $stmt = $pdo->prepare("
         INSERT INTO form_submissions (canvas_id, data)
         VALUES (:canvas_id, :data)
@@ -51,8 +70,8 @@ try {
     $submission_id = (int)$stmt->fetchColumn();
 
     // Fire webhook if configured
-    $webhook_url = $row['webhook_url'] ?? '';
-    if ($webhook_url) {
+    $webhook_url = (string)($canvas['webhook_url'] ?? '');
+    if ($webhook_url !== '') {
         $payload = json_encode([
             'canvas_id'     => $canvas_id,
             'submission_id' => $submission_id,

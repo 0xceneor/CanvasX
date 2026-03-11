@@ -1,18 +1,27 @@
 <?php
+declare(strict_types=1);
+
 /**
  * Development router — php -S localhost:8080 router.php
- * Handles all URL routing without Nginx.
+ * Handles URL routing without Nginx for local dev.
+ *
+ * PHP 8.4 features:
+ *  - declare(strict_types=1)
+ *  - match expression (already present, expanded)
+ *  - str_ends_with / str_starts_with
+ *  - Typed variables
  */
 
-$uri = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
-$uri = '/' . ltrim($uri, '/');
+$uri = '/' . ltrim((string)parse_url((string)$_SERVER['REQUEST_URI'], PHP_URL_PATH), '/');
 
-// Block data, config, ws internals, .env
+// Block internal directories
 if (preg_match('#^/(data|\.env|config/|ws/|db/)#', $uri)) {
-    http_response_code(403); echo 'Forbidden'; exit;
+    http_response_code(403);
+    echo 'Forbidden';
+    exit;
 }
 
-// Serve real static files from public/
+// Serve real static files from public/ (no PHP)
 $public_file = __DIR__ . '/public' . $uri;
 if (is_file($public_file) && !str_ends_with($public_file, '.php')) {
     return false;
@@ -21,69 +30,70 @@ if (is_file($public_file) && !str_ends_with($public_file, '.php')) {
 // /c/<id>
 if (preg_match('#^/c/([a-zA-Z0-9]+)/?$#', $uri, $m)) {
     $_GET['id'] = $m[1];
-    require __DIR__ . '/public/canvas.php'; exit;
+    require __DIR__ . '/public/canvas.php';
+    exit;
 }
 
-// /generate
-if (in_array($uri, ['/generate', '/generate/'])) {
-    require __DIR__ . '/public/generate.php'; exit;
+// Named page routes
+$page = match (rtrim($uri, '/')) {
+    '/generate' => __DIR__ . '/public/generate.php',
+    '/docs'     => __DIR__ . '/public/docs.php',
+    '/og.php'   => __DIR__ . '/public/og.php',
+    '/', ''     => __DIR__ . '/public/index.php',
+    default     => null,
+};
+
+if ($page !== null) {
+    require $page;
+    exit;
 }
 
-// /docs
-if (in_array($uri, ['/docs', '/docs/'])) {
-    require __DIR__ . '/public/docs.php'; exit;
-}
-
-// /og.php
-if ($uri === '/og.php') {
-    require __DIR__ . '/public/og.php'; exit;
-}
-
-// /api/*
+// /api/*.php
 if (preg_match('#^/api/([a-z\-]+\.php)$#', $uri, $m)) {
     $f = __DIR__ . '/public/api/' . $m[1];
     if (is_file($f)) { require $f; exit; }
 }
 
-// /pipeline/*
+// /pipeline/*.php
 if (preg_match('#^/pipeline/([a-z\-]+\.php)$#', $uri, $m)) {
     $f = __DIR__ . '/pipeline/' . $m[1];
     if (is_file($f)) { require $f; exit; }
 }
 
-// /assets/*
+// /assets/*  — serve with correct MIME via match
 if (preg_match('#^/assets/(.+)$#', $uri, $m)) {
     $f = __DIR__ . '/public/assets/' . $m[1];
     if (is_file($f)) {
-        $mime = match(pathinfo($f, PATHINFO_EXTENSION)) {
+        $mime = match (pathinfo($f, PATHINFO_EXTENSION)) {
             'js'  => 'application/javascript',
             'css' => 'text/css',
             'svg' => 'image/svg+xml',
             'png' => 'image/png',
+            'ico' => 'image/x-icon',
             default => 'application/octet-stream',
         };
         header('Content-Type: ' . $mime);
-        readfile($f); exit;
+        readfile($f);
+        exit;
     }
 }
 
-// /components/*
+// /components/*.js
 if (preg_match('#^/components/(.+\.js)$#', $uri, $m)) {
     $f = __DIR__ . '/public/components/' . $m[1];
     if (is_file($f)) {
         header('Content-Type: application/javascript');
-        readfile($f); exit;
+        readfile($f);
+        exit;
     }
 }
 
-// Root → generator
-if (in_array($uri, ['/', ''])) {
-    require __DIR__ . '/public/index.php'; exit;
-}
-
 // Fallback: try public/<uri>.php
-$php_file = __DIR__ . '/public' . $uri . '.php';
-if (is_file($php_file)) { require $php_file; exit; }
+$php_fallback = __DIR__ . '/public' . $uri . '.php';
+if (is_file($php_fallback)) {
+    require $php_fallback;
+    exit;
+}
 
 http_response_code(404);
 echo '404 — ' . htmlspecialchars($uri);
